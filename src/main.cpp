@@ -142,6 +142,7 @@ struct SavedSettings {
   uint8_t nightEndHour;
   char ntpServer[64];
   char tzInfo[64];
+  uint8_t transitionMode;
 };
 
 const uint32_t SETTINGS_MAGIC = 0xC10C2032;
@@ -155,6 +156,16 @@ void wifiSearchingAnimation();
 void wifiConnectingAnimation();
 void wifiConnectedAnimation();
 void wifiFailedAnimation();
+void waveAnimation();
+void cometAnimation();
+void bottomToTopAnimation();
+void rainAnimation();
+void sparkleAnimation();
+void scannerAnimation();
+void breathingDualColorAnimation();
+void transitionPreviewAnimation();
+void showStartupTechnicalSequence();
+void showCiaoMessage();
 void displayClock();
 void setDigit(uint8_t number, uint8_t index);
 void handleRoot();
@@ -172,12 +183,14 @@ void saveSettings();
 uint8_t getActiveBrightness(const tm* localNow = nullptr);
 uint32_t scaleColorBrightness(uint32_t color, uint8_t brightness);
 void logRtcTime(const char* prefix);
+bool isNightHour(const tm* localNow);
+void triggerVisualCue(uint32_t color, unsigned long durationMs);
 
 // Default settings
 uint32_t colorQuadrants = ring.Color(255, 255, 255);   // legacy (unused)
 uint32_t colorHourHand = ring.Color(255, 0, 0);        // legacy (unused)
 uint32_t colorMinuteHand = ring.Color(255, 255, 255);  // legacy (unused)
-uint32_t colorSecondHand = ring.Color(0, 0, 255);      // legacy (unused)
+uint32_t colorSecondHand = ring.Color(0, 96, 255);
 bool showQuadrants = false;                            // legacy (unused)
 uint8_t quadrantMode = 12; // legacy (unused)
 uint8_t hourHandMode = 0;  // legacy (unused)
@@ -188,6 +201,10 @@ uint8_t timeSourceMode = 0;
 uint8_t dimBrightness = 80;
 uint8_t nightStartHour = 22;
 uint8_t nightEndHour = 7;
+// Transition effects:
+// 0 smooth, 1 instant, 2 soft, 3 wipe, 4 clockwise,
+// 5 dual-phase, 6 bounce, 7 glitch, 8 overshoot, 9 slide
+uint8_t transitionMode = 0;
 const uint8_t NORMAL_BRIGHTNESS = 255;
 
 byte digits[12][7] = {
@@ -207,6 +224,32 @@ byte digits[12][7] = {
 
 byte segmentState[NUM_SEG * 7] = {0};
 uint16_t transitionStep = 0;
+
+const uint32_t COLOR_SEGMENT_DAY = 0xFFFFFF;
+const uint32_t COLOR_SEGMENT_NIGHT = 0xFFC080;
+const uint32_t COLOR_COLON_DAY = 0x0060FF;
+const uint32_t COLOR_COLON_NIGHT = 0x7A3C18;
+const uint32_t COLOR_EVENT_NTP_OK = 0x00FF40;
+const uint32_t COLOR_EVENT_NTP_FAIL = 0xFF2020;
+const uint32_t COLOR_EVENT_WIFI_OK = 0x00FF00;
+const uint32_t COLOR_EVENT_WIFI_LOST = 0xFF0000;
+const uint32_t COLOR_EVENT_RTC_FALLBACK = 0x0090FF;
+
+uint8_t lastDisplayedMinute = 255;
+bool minuteSweepActive = false;
+uint8_t minuteSweepDigit = 0;
+unsigned long minuteSweepStepMs = 0;
+
+bool ntpSyncInProgress = false;
+unsigned long cueUntilMs = 0;
+uint32_t cueColor = 0;
+unsigned long lastFallbackCueMs = 0;
+bool previousWifiConnected = false;
+unsigned long ntpRetryIntervalMs = 30000UL;
+uint8_t ntpRetryCount = 0;
+bool transitionPreviewActive = false;
+uint8_t transitionPreviewHours = 12;
+uint8_t transitionPreviewMinutes = 34;
 
 void setup() {
   Serial.begin(9600);
@@ -229,11 +272,24 @@ void setup() {
   ring.setBrightness(NORMAL_BRIGHTNESS);
   ring.show();
 
+  // Startup technical test first of all.
+  showStartupTechnicalSequence();
+
 
   // Play startup animations
   rotatingRingAnimation();
   pulsatingGlowAnimation();
   progressBarAnimation();
+
+  // Station hostname shown in DHCP/router client list.
+  WiFi.mode(WIFI_STA);
+  #if defined(ARDUINO_ARCH_ESP8266)
+  WiFi.hostname("segment-clock");
+  #elif defined(ARDUINO_ARCH_ESP32)
+  WiFi.setHostname("segment-clock");
+  #endif
+  wm.setHostname("segment-clock");
+
   // Wi-Fi setup with captive portal (no hardcoded SSID/password)
   // Non-blocking mode keeps LED animations alive while portal is active.
   wm.setConfigPortalBlocking(false);
@@ -246,6 +302,7 @@ void setup() {
     Serial.print("IP Address: ");
     Serial.println(WiFi.localIP());
     wifiConnectedAnimation();
+    showCiaoMessage();
     if (timeSourceMode == 0) {
       timeSynced = syncTimeWithNTP();
     } else {
@@ -268,12 +325,18 @@ void setup() {
 void loop() {
   wm.process();
 
-  if (WiFi.status() == WL_CONNECTED) {
+  bool wifiNow = (WiFi.status() == WL_CONNECTED);
+  if (wifiNow) {
+    if (!previousWifiConnected) {
+      triggerVisualCue(COLOR_EVENT_WIFI_OK, 1200UL);
+    }
+
     if (!wifiConnectedHandled) {
       Serial.println("Wi-Fi connected");
       Serial.print("IP Address: ");
       Serial.println(WiFi.localIP());
       wifiConnectedAnimation();
+      showCiaoMessage();
       if (timeSourceMode == 0) {
         timeSynced = syncTimeWithNTP();
       } else {
@@ -282,15 +345,31 @@ void loop() {
       wifiConnectedHandled = true;
     }
 
-    if (timeSourceMode == 0 && !timeSynced && (millis() - lastNtpRetryMs > 30000UL)) {
+    if (timeSourceMode == 0 && !timeSynced && (millis() - lastNtpRetryMs > ntpRetryIntervalMs)) {
       lastNtpRetryMs = millis();
+      Serial.println(String("NTP retry #") + String(ntpRetryCount + 1) + String(" after ") + String(ntpRetryIntervalMs / 1000UL) + String("s"));
+      triggerVisualCue(ring.Color(255, 180, 0), 500UL);
       timeSynced = syncTimeWithNTP();
+      if (timeSynced) {
+        ntpRetryCount = 0;
+        ntpRetryIntervalMs = 30000UL;
+      } else {
+        if (ntpRetryCount < 20) {
+          ntpRetryCount++;
+        }
+        ntpRetryIntervalMs = min(300000UL, ntpRetryIntervalMs * 2UL);
+      }
     }
 
     displayClock();
   } else {
+    if (previousWifiConnected) {
+      triggerVisualCue(COLOR_EVENT_WIFI_LOST, 1200UL);
+    }
     wifiSearchingAnimation();
   }
+
+  previousWifiConnected = wifiNow;
 
   server.handleClient();
 }
@@ -299,6 +378,7 @@ void displayClock() {
   applyTimezone();
 
   time_t nowEpoch = time(nullptr);
+  bool usedRtcFallback = false;
 
   if (timeSourceMode == 1 && rtcAvailable) {
     DateTime rtcNow = rtc.now();
@@ -309,6 +389,7 @@ void displayClock() {
     if (rtcAvailable) {
       DateTime rtcNow = rtc.now();
       nowEpoch = rtcNow.unixtime();
+      usedRtcFallback = true;
       logRtcTime("Using DS3231 fallback");
     }
 
@@ -323,15 +404,62 @@ void displayClock() {
   struct tm now;
   localtime_r(&nowEpoch, &now);
   uint8_t activeBrightness = getActiveBrightness(&now);
+  bool nightVisualMode = isNightHour(&now);
   ring.setBrightness(activeBrightness);
+
+  if (usedRtcFallback && (millis() - lastFallbackCueMs > 10000UL)) {
+    lastFallbackCueMs = millis();
+    triggerVisualCue(COLOR_EVENT_RTC_FALLBACK, 800UL);
+  }
 
   uint8_t hours = (uint8_t)now.tm_hour;
   uint8_t minutes = (uint8_t)now.tm_min;
+  if (transitionPreviewActive) {
+    hours = transitionPreviewHours;
+    minutes = transitionPreviewMinutes;
+  }
+
+  if (lastDisplayedMinute == 255) {
+    lastDisplayedMinute = minutes;
+  } else if (minutes != lastDisplayedMinute) {
+    lastDisplayedMinute = minutes;
+    minuteSweepActive = true;
+    minuteSweepDigit = 0;
+    minuteSweepStepMs = millis();
+  }
 
   setDigit(hours, 1);
   setDigit(minutes, 2);
 
-  transitionStep += 8;
+  if (minuteSweepActive && (millis() - minuteSweepStepMs >= 120UL)) {
+    minuteSweepStepMs = millis();
+    minuteSweepDigit++;
+    if (minuteSweepDigit >= NUM_SEG) {
+      minuteSweepActive = false;
+    }
+  }
+
+  if (transitionMode == 1) {
+    for (uint16_t i = 0; i < NUM_SEG * 7; i++) {
+      if (segmentState[i] == 2) {
+        segmentState[i] = 0;
+      } else if (segmentState[i] == 3) {
+        segmentState[i] = 1;
+      }
+    }
+  }
+
+  uint8_t transitionStepSize;
+  if (transitionMode == 2) {
+    transitionStepSize = nightVisualMode ? 2 : 6;
+  } else if (transitionMode == 7) {
+    transitionStepSize = nightVisualMode ? 6 : 18;
+  } else if (transitionMode == 8) {
+    transitionStepSize = nightVisualMode ? 6 : 16;
+  } else {
+    transitionStepSize = nightVisualMode ? 4 : 12;
+  }
+  transitionStep += transitionStepSize;
   if (transitionStep > 254) {
     for (uint16_t i = 0; i < NUM_SEG * 7; i++) {
       if (segmentState[i] == 2) {
@@ -347,29 +475,111 @@ void displayClock() {
   for (uint16_t i = 0; i < NUM_SEG; i++) {
     for (uint16_t j = 0; j < 7; j++) {
       uint16_t ledIndex = i * 7 + j;
-      if (segmentState[ledIndex] == 0) {
-        ring.setPixelColor(ledIndex, ring.Color(0, 0, 0));
-      } else if (segmentState[ledIndex] == 1) {
-        ring.setPixelColor(ledIndex, ring.Color(255, 255, 255));
-      } else if (segmentState[ledIndex] == 2) {
-        uint8_t fade = (uint8_t)(254 - transitionStep);
-        ring.setPixelColor(ledIndex, ring.Color(fade, fade, fade));
-      } else {
-        ring.setPixelColor(ledIndex, ring.Color(transitionStep, transitionStep, transitionStep));
+      uint8_t digitSlot = (uint8_t)(ledIndex / 7);
+      uint8_t segPos = (uint8_t)(ledIndex % 7);
+      static const uint8_t clockwiseRank[7] = {0, 2, 3, 1, 5, 6, 4};
+      uint8_t segRank = clockwiseRank[segPos];
+      uint32_t onColor = colorQuadrants;
+      if (nightVisualMode && colorQuadrants == COLOR_SEGMENT_DAY) {
+        onColor = COLOR_SEGMENT_NIGHT;
       }
+
+      uint16_t pulsePhase = (uint16_t)((millis() / 12UL) % 512UL);
+      uint8_t pulseTri = (pulsePhase < 256) ? (uint8_t)pulsePhase : (uint8_t)(511 - pulsePhase);
+      uint8_t pulseBrightness = (uint8_t)(190 + ((uint16_t)pulseTri * 65U) / 255U);
+
+      uint32_t ledColor = ring.Color(0, 0, 0);
+      if (segmentState[ledIndex] == 0) {
+        ledColor = ring.Color(0, 0, 0);
+      } else if (segmentState[ledIndex] == 1) {
+        ledColor = scaleColorBrightness(onColor, pulseBrightness);
+      } else if (segmentState[ledIndex] == 2) {
+        int fade = 254 - transitionStep;
+        if (transitionMode == 3) {
+          int gate = (int)segPos * 28;
+          fade = (transitionStep < gate) ? 255 : (255 - (transitionStep - gate) * 2);
+        } else if (transitionMode == 4) {
+          int gate = (int)segRank * 28;
+          fade = (transitionStep < gate) ? 255 : (255 - (transitionStep - gate) * 2);
+        } else if (transitionMode == 5) {
+          fade = (transitionStep < 128) ? (255 - (int)transitionStep * 2) : 0;
+        } else if (transitionMode == 6) {
+          fade = (transitionStep < 90) ? 255 : (255 - ((int)transitionStep - 90) * 3);
+        } else if (transitionMode == 7) {
+          if (transitionStep < 72 && random(0, 100) < 30) {
+            fade = random(20, 255);
+          }
+        } else if (transitionMode == 8) {
+          fade = 255 - (int)transitionStep * 2;
+        } else if (transitionMode == 9) {
+          int gate = (int)digitSlot * 52;
+          fade = (transitionStep < gate) ? 255 : (255 - (transitionStep - gate) * 2);
+        }
+        if (fade < 0) fade = 0;
+        if (fade > 255) fade = 255;
+        ledColor = scaleColorBrightness(onColor, fade);
+      } else {
+        int inb = transitionStep;
+        if (transitionMode == 3) {
+          int gate = (int)segPos * 28;
+          inb = (transitionStep < gate) ? 0 : (transitionStep - gate) * 2;
+        } else if (transitionMode == 4) {
+          int gate = (int)segRank * 28;
+          inb = (transitionStep < gate) ? 0 : (transitionStep - gate) * 2;
+        } else if (transitionMode == 5) {
+          inb = (transitionStep < 128) ? 0 : ((int)transitionStep - 128) * 2;
+        } else if (transitionMode == 6) {
+          if (transitionStep < 128) {
+            inb = transitionStep * 2;
+          } else if (transitionStep < 200) {
+            inb = 255 - ((int)transitionStep - 128) * 2 / 3;
+          } else {
+            inb = 220 + ((int)transitionStep - 200) * 35 / 55;
+          }
+        } else if (transitionMode == 7) {
+          if (transitionStep < 72 && random(0, 100) < 35) {
+            inb = random(0, 255);
+          }
+        } else if (transitionMode == 8) {
+          inb = (transitionStep < 170) ? (transitionStep + 90) : 255;
+        } else if (transitionMode == 9) {
+          int gate = (int)digitSlot * 52;
+          inb = (transitionStep < gate) ? 0 : (transitionStep - gate) * 2;
+        }
+        if (inb < 0) inb = 0;
+        if (inb > 255) inb = 255;
+        ledColor = scaleColorBrightness(onColor, (uint8_t)inb);
+      }
+
+      if (minuteSweepActive && segmentState[ledIndex] != 0) {
+        uint8_t sweepBrightness = (digitSlot == minuteSweepDigit) ? 255 : (nightVisualMode ? 115 : 145);
+        ledColor = scaleColorBrightness(ledColor, sweepBrightness);
+      }
+
+      ring.setPixelColor(ledIndex, ledColor);
     }
   }
 
-  if ((now.tm_sec % 2) == 0) {
-    ring.setPixelColor(NUM_SEG * 7, ring.Color(0, 0, 153));
-    ring.setPixelColor(NUM_SEG * 7 + 1, ring.Color(0, 0, 153));
+  uint32_t colonColor = colorSecondHand;
+  if (nightVisualMode) {
+    colonColor = scaleColorBrightness(colonColor, 160);
+  }
+  if (millis() < cueUntilMs) {
+    colonColor = cueColor;
+  }
+
+  bool quickColon = (ntpSyncInProgress || (timeSourceMode == 0 && !timeSynced));
+  bool colonOn = quickColon ? (((millis() / 250UL) % 2) == 0) : ((now.tm_sec % 2) == 0);
+  if (colonOn) {
+    ring.setPixelColor(NUM_SEG * 7, colonColor);
+    ring.setPixelColor(NUM_SEG * 7 + 1, colonColor);
   } else {
-    ring.setPixelColor(NUM_SEG * 7, ring.Color(153, 0, 0));
-    ring.setPixelColor(NUM_SEG * 7 + 1, ring.Color(153, 0, 0));
+    ring.setPixelColor(NUM_SEG * 7, ring.Color(0, 0, 0));
+    ring.setPixelColor(NUM_SEG * 7 + 1, ring.Color(0, 0, 0));
   }
 
   ring.show();
-  delay(10);
+  delay(nightVisualMode ? 16 : 8);
 }
 
 void setDigit(uint8_t number, uint8_t index) {
@@ -385,13 +595,17 @@ void setDigit(uint8_t number, uint8_t index) {
       if (segmentIndex >= (NUM_SEG * 7)) {
         continue;
       }
-      if ((digits[digit][j] == 0) && (segmentState[segmentIndex] == 1)) {
-        segmentState[segmentIndex] = 2;
-        transitionStep = 0;
-      }
-      if ((digits[digit][j] == 1) && (segmentState[segmentIndex] == 0)) {
-        segmentState[segmentIndex] = 3;
-        transitionStep = 0;
+      if (transitionMode == 1) {
+        segmentState[segmentIndex] = digits[digit][j] ? 1 : 0;
+      } else {
+        if ((digits[digit][j] == 0) && (segmentState[segmentIndex] == 1)) {
+          segmentState[segmentIndex] = 2;
+          transitionStep = 0;
+        }
+        if ((digits[digit][j] == 1) && (segmentState[segmentIndex] == 0)) {
+          segmentState[segmentIndex] = 3;
+          transitionStep = 0;
+        }
       }
     }
   }
@@ -449,6 +663,13 @@ void handleRoot() {
   html += "<option value='wifiConnecting'>WiFi Connecting</option>";
   html += "<option value='wifiConnected'>WiFi Connected</option>";
   html += "<option value='wifiFailed'>WiFi Failed</option>";
+  html += "<option value='wave'>Wave</option>";
+  html += "<option value='comet'>Comet</option>";
+  html += "<option value='bottomToTop'>Bottom to Top</option>";
+  html += "<option value='rain'>Rain</option>";
+  html += "<option value='sparkle'>Sparkle</option>";
+  html += "<option value='scanner'>Scanner</option>";
+  html += "<option value='breathingDual'>Breathing Dual-Color</option>";
   html += "</select></div>";
   html += "<button type='submit'>Run Animation</button>";
   html += "</form>";
@@ -463,10 +684,64 @@ void handleRoot() {
 
   html += "<form action='/update' method='POST'>";
   html += "<h2>LED Colors</h2><div class='grid'>";
-  html += "<div class='row'><label>Segment Color (white)</label><input type='color' name='segmentColor' value='#FFFFFF'></div>";
+  html += "<div class='row'><label>Segment Color</label><input type='color' name='segmentColor' value='" + colorToHex(colorQuadrants) + "'></div>";
+  html += "<div class='row'><label>Second Dots Color</label><input type='color' name='secondColor' value='" + colorToHex(colorSecondHand) + "'></div>";
   html += "</div>";
   html += "<h2>Display</h2>";
   html += "<small>La visualizzazione a 7 segmenti non usa quadranti o lancette.</small><br><br>";
+  html += "<div class='row'><label>Transition Effect</label>";
+  html += "<select id='transitionModeSelect' name='transitionMode' style='width:100%;height:40px;border-radius:8px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;padding:0 10px;box-sizing:border-box;'>";
+  html += "<option value='0'";
+  if (transitionMode == 0) {
+    html += " selected";
+  }
+  html += ">Smooth</option>";
+  html += "<option value='1'";
+  if (transitionMode == 1) {
+    html += " selected";
+  }
+  html += ">Instant</option>";
+  html += "<option value='2'";
+  if (transitionMode == 2) {
+    html += " selected";
+  }
+  html += ">Soft (slow fade)</option>";
+  html += "<option value='3'";
+  if (transitionMode == 3) {
+    html += " selected";
+  }
+  html += ">Wipe</option>";
+  html += "<option value='4'";
+  if (transitionMode == 4) {
+    html += " selected";
+  }
+  html += ">Clockwise</option>";
+  html += "<option value='5'";
+  if (transitionMode == 5) {
+    html += " selected";
+  }
+  html += ">Dual-phase</option>";
+  html += "<option value='6'";
+  if (transitionMode == 6) {
+    html += " selected";
+  }
+  html += ">Bounce</option>";
+  html += "<option value='7'";
+  if (transitionMode == 7) {
+    html += " selected";
+  }
+  html += ">Glitch Soft</option>";
+  html += "<option value='8'";
+  if (transitionMode == 8) {
+    html += " selected";
+  }
+  html += ">Overshoot</option>";
+  html += "<option value='9'";
+  if (transitionMode == 9) {
+    html += " selected";
+  }
+  html += ">Slide</option>";
+  html += "</select></div>";
   html += "<h2>Brightness</h2>";
   html += "<div class='row'><label>Brightness Mode</label>";
   html += "<select name='brightnessMode' style='width:100%;height:40px;border-radius:8px;border:1px solid #475569;background:#0b1220;color:#e2e8f0;padding:0 10px;box-sizing:border-box;'>";
@@ -573,6 +848,15 @@ void handleRoot() {
   html += "<small>Esempio: pool.ntp.org, time.google.com</small><br><br>";
   html += "<button type='submit'>Save Settings</button>";
   html += "</form>";
+  html += "<script>";
+  html += "(function(){var sel=document.getElementById('transitionModeSelect');if(!sel)return;";
+  html += "sel.addEventListener('change',function(){";
+  html += "var f=sel.form;var p=new URLSearchParams(new FormData(f));";
+  html += "fetch('/update',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:p.toString()})";
+  html += ".then(function(){return fetch('/testAnimation',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'animation=transitionPreview'});})";
+  html += ".then(function(){window.location.href='/';});";
+  html += "});})();";
+  html += "</script>";
   html += "</div></body></html>";
 
   server.send(200, "text/html", html);
@@ -583,7 +867,16 @@ void handleUpdate() {
   bool timezoneChanged = false;
 
   if (server.hasArg("segmentColor")) {
-    (void)server.arg("segmentColor");
+    String c = server.arg("segmentColor");
+    if (c.length() == 7 && c[0] == '#') {
+      colorQuadrants = hexToColor(c);
+    }
+  }
+  if (server.hasArg("secondColor")) {
+    String c = server.arg("secondColor");
+    if (c.length() == 7 && c[0] == '#') {
+      colorSecondHand = hexToColor(c);
+    }
   }
   if (server.hasArg("brightnessMode")) {
     int mode = server.arg("brightnessMode").toInt();
@@ -594,6 +887,16 @@ void handleUpdate() {
       mode = 2;
     }
     brightnessMode = (uint8_t)mode;
+  }
+  if (server.hasArg("transitionMode")) {
+    int mode = server.arg("transitionMode").toInt();
+    if (mode < 0) {
+      mode = 0;
+    }
+    if (mode > 9) {
+      mode = 9;
+    }
+    transitionMode = (uint8_t)mode;
   }
   if (server.hasArg("timeSourceMode")) {
     int mode = server.arg("timeSourceMode").toInt();
@@ -779,6 +1082,22 @@ void handleTestAnimation() {
     wifiConnectedAnimation();
   } else if (animation == "wifiFailed") {
     wifiFailedAnimation();
+  } else if (animation == "wave") {
+    waveAnimation();
+  } else if (animation == "comet") {
+    cometAnimation();
+  } else if (animation == "bottomToTop") {
+    bottomToTopAnimation();
+  } else if (animation == "rain") {
+    rainAnimation();
+  } else if (animation == "sparkle") {
+    sparkleAnimation();
+  } else if (animation == "scanner") {
+    scannerAnimation();
+  } else if (animation == "breathingDual") {
+    breathingDualColorAnimation();
+  } else if (animation == "transitionPreview") {
+    transitionPreviewAnimation();
   }
 
   server.sendHeader("Location", "/");
@@ -832,6 +1151,7 @@ bool syncTimeWithNTP() {
     return rtcAvailable && (rtc.now().unixtime() > 100000);
   }
 
+  ntpSyncInProgress = true;
   Serial.println("Syncing time with NTP...");
   #if defined(ARDUINO_ARCH_ESP8266)
   // ESP8266: overload with TZ string.
@@ -854,13 +1174,39 @@ bool syncTimeWithNTP() {
       }
       Serial.println("NTP sync successful");
       Serial.println(String("Local time after sync: ") + timeBuf + " TZ=" + tzInfo);
+      ntpSyncInProgress = false;
+      ntpRetryCount = 0;
+      ntpRetryIntervalMs = 30000UL;
+      triggerVisualCue(COLOR_EVENT_NTP_OK, 1200UL);
       return true;
     }
     delay(250);
   }
 
   Serial.println("NTP sync failed");
+  ntpSyncInProgress = false;
+  triggerVisualCue(COLOR_EVENT_NTP_FAIL, 1200UL);
   return false;
+}
+
+bool isNightHour(const tm* localNow) {
+  if (localNow == nullptr || brightnessMode != 1) {
+    return false;
+  }
+
+  int hour = localNow->tm_hour;
+  if (nightStartHour == nightEndHour) {
+    return true;
+  }
+  if (nightStartHour < nightEndHour) {
+    return (hour >= nightStartHour && hour < nightEndHour);
+  }
+  return (hour >= nightStartHour || hour < nightEndHour);
+}
+
+void triggerVisualCue(uint32_t color, unsigned long durationMs) {
+  cueColor = color;
+  cueUntilMs = millis() + durationMs;
 }
 
 void logRtcTime(const char* prefix) {
@@ -951,6 +1297,7 @@ void loadSettings() {
     strncpy(tzInfo, s.tzInfo, sizeof(tzInfo));
     tzInfo[sizeof(tzInfo) - 1] = '\0';
   }
+  transitionMode = (s.transitionMode <= 9) ? s.transitionMode : 0;
 
   Serial.println(String("Loaded NTP from EEPROM: ") + ntpServer);
   Serial.println(String("Loaded TZ from EEPROM: ") + tzInfo);
@@ -958,7 +1305,7 @@ void loadSettings() {
 }
 
 void saveSettings() {
-  SavedSettings s;
+  SavedSettings s = {};
   s.magic = SETTINGS_MAGIC;
   s.colorQuadrants = colorQuadrants;
   s.colorHourHand = colorHourHand;
@@ -976,10 +1323,81 @@ void saveSettings() {
   s.ntpServer[sizeof(s.ntpServer) - 1] = '\0';
   strncpy(s.tzInfo, tzInfo, sizeof(s.tzInfo));
   s.tzInfo[sizeof(s.tzInfo) - 1] = '\0';
+  s.transitionMode = (transitionMode <= 9) ? transitionMode : 0;
 
   EEPROM.put(0, s);
   EEPROM.commit();
   Serial.println("Settings saved to EEPROM");
+}
+
+void showStartupTechnicalSequence() {
+  const uint8_t startup1234[4] = {1, 2, 3, 4};
+  const uint8_t startup8888[4] = {8, 8, 8, 8};
+
+  ring.clear();
+  for (uint8_t digitIndex = 0; digitIndex < NUM_SEG; digitIndex++) {
+    for (uint8_t seg = 0; seg < 7; seg++) {
+      uint16_t ledIndex = (uint16_t)digitIndex * 7 + seg;
+      if (digits[startup1234[digitIndex]][seg]) {
+        ring.setPixelColor(ledIndex, colorQuadrants);
+      } else {
+        ring.setPixelColor(ledIndex, ring.Color(0, 0, 0));
+      }
+    }
+  }
+  ring.setPixelColor(NUM_SEG * 7, colorSecondHand);
+  ring.setPixelColor(NUM_SEG * 7 + 1, colorSecondHand);
+  ring.show();
+  delay(1000);
+
+  ring.clear();
+  for (uint8_t digitIndex = 0; digitIndex < NUM_SEG; digitIndex++) {
+    for (uint8_t seg = 0; seg < 7; seg++) {
+      uint16_t ledIndex = (uint16_t)digitIndex * 7 + seg;
+      if (digits[startup8888[digitIndex]][seg]) {
+        ring.setPixelColor(ledIndex, colorQuadrants);
+      } else {
+        ring.setPixelColor(ledIndex, ring.Color(0, 0, 0));
+      }
+    }
+  }
+  ring.setPixelColor(NUM_SEG * 7, ring.Color(0, 0, 0));
+  ring.setPixelColor(NUM_SEG * 7 + 1, ring.Color(0, 0, 0));
+  ring.show();
+  delay(1000);
+}
+
+void showCiaoMessage() {
+  // C I A O glyphs mapped on 7 segments (order consistent with `digits`).
+  const uint8_t ciaoGlyph[4][7] = {
+    {1, 1, 0, 0, 1, 1, 0}, // C
+    {0, 0, 0, 1, 0, 0, 1}, // I (approx, similar to "1")
+    {0, 1, 1, 1, 1, 1, 1}, // A
+    {1, 1, 0, 1, 1, 1, 1}  // O as 0
+  };
+
+  // Rainbow animation on the "CIAO" glyph for ~5 seconds.
+  for (uint16_t frame = 0; frame < 100; frame++) {
+    for (uint8_t digitIndex = 0; digitIndex < NUM_SEG; digitIndex++) {
+      for (uint8_t seg = 0; seg < 7; seg++) {
+        uint16_t ledIndex = (uint16_t)digitIndex * 7 + seg;
+        if (ciaoGlyph[digitIndex][seg]) {
+          float phase = (float)frame * 0.14f + (float)ledIndex * 0.35f;
+          uint8_t r = (uint8_t)((sinf(phase) + 1.0f) * 127.0f);
+          uint8_t g = (uint8_t)((sinf(phase + 2.094f) + 1.0f) * 127.0f);
+          uint8_t b = (uint8_t)((sinf(phase + 4.188f) + 1.0f) * 127.0f);
+          ring.setPixelColor(ledIndex, ring.Color(r, g, b));
+        } else {
+          ring.setPixelColor(ledIndex, ring.Color(0, 0, 0));
+        }
+      }
+    }
+
+    ring.setPixelColor(NUM_SEG * 7, ring.Color(0, 0, 0));
+    ring.setPixelColor(NUM_SEG * 7 + 1, ring.Color(0, 0, 0));
+    ring.show();
+    delay(50);
+  }
 }
 
 
@@ -1064,6 +1482,144 @@ void wifiFailedAnimation() {
     ring.show();
     delay(200);
   }
+}
+
+void waveAnimation() {
+  for (uint16_t step = 0; step < 100; step++) {
+    for (int i = 0; i < NUM_LEDS; i++) {
+      float phase = (float)i * 0.45f + (float)step * 0.22f;
+      uint8_t b = (uint8_t)((sinf(phase) + 1.0f) * 127.0f);
+      uint8_t g = (uint8_t)(b / 2);
+      ring.setPixelColor(i, ring.Color(0, g, b));
+    }
+    ring.show();
+    delay(25);
+  }
+}
+
+void cometAnimation() {
+  const int tail = 5;
+  for (int head = -tail; head < NUM_LEDS + tail; head++) {
+    ring.clear();
+    for (int t = 0; t < tail; t++) {
+      int idx = head - t;
+      if (idx >= 0 && idx < NUM_LEDS) {
+        uint8_t fade = (uint8_t)(255 - t * (200 / tail));
+        ring.setPixelColor(idx, ring.Color(fade, fade / 4, 0));
+      }
+    }
+    ring.show();
+    delay(35);
+  }
+}
+
+void bottomToTopAnimation() {
+  // Assumes LED order follows physical wiring; reverse order gives a bottom->top feel on many builds.
+  ring.clear();
+  for (int i = NUM_LEDS - 1; i >= 0; i--) {
+    ring.setPixelColor(i, ring.Color(255, 180, 0));
+    ring.show();
+    delay(45);
+  }
+  delay(180);
+  ring.clear();
+  ring.show();
+}
+
+void rainAnimation() {
+  ring.clear();
+  for (int frame = 0; frame < 80; frame++) {
+    for (int i = 0; i < NUM_LEDS; i++) {
+      if (random(0, 100) < 8) {
+        ring.setPixelColor(i, ring.Color(0, random(20, 90), random(120, 255)));
+      } else {
+        ring.setPixelColor(i, ring.Color(0, 0, 0));
+      }
+    }
+    ring.show();
+    delay(45);
+  }
+  ring.clear();
+  ring.show();
+}
+
+void sparkleAnimation() {
+  ring.clear();
+  for (int frame = 0; frame < 90; frame++) {
+    for (int i = 0; i < NUM_LEDS; i++) {
+      if (random(0, 100) < 10) {
+        uint8_t w = (uint8_t)random(120, 255);
+        ring.setPixelColor(i, ring.Color(w, w, w));
+      } else {
+        ring.setPixelColor(i, ring.Color(0, 0, 0));
+      }
+    }
+    ring.show();
+    delay(28);
+  }
+  ring.clear();
+  ring.show();
+}
+
+void scannerAnimation() {
+  for (int cycle = 0; cycle < 2; cycle++) {
+    for (int pos = 0; pos < NUM_LEDS; pos++) {
+      ring.clear();
+      ring.setPixelColor(pos, ring.Color(255, 0, 0));
+      int tail1 = pos - 1;
+      int tail2 = pos - 2;
+      if (tail1 >= 0) ring.setPixelColor(tail1, ring.Color(120, 0, 0));
+      if (tail2 >= 0) ring.setPixelColor(tail2, ring.Color(50, 0, 0));
+      ring.show();
+      delay(30);
+    }
+    for (int pos = NUM_LEDS - 1; pos >= 0; pos--) {
+      ring.clear();
+      ring.setPixelColor(pos, ring.Color(255, 0, 0));
+      int tail1 = pos + 1;
+      int tail2 = pos + 2;
+      if (tail1 < NUM_LEDS) ring.setPixelColor(tail1, ring.Color(120, 0, 0));
+      if (tail2 < NUM_LEDS) ring.setPixelColor(tail2, ring.Color(50, 0, 0));
+      ring.show();
+      delay(30);
+    }
+  }
+  ring.clear();
+  ring.show();
+}
+
+void breathingDualColorAnimation() {
+  for (int step = 0; step < 180; step++) {
+    float t = step * 0.06f;
+    float a = (sinf(t) + 1.0f) * 0.5f;
+    uint8_t r = (uint8_t)(255.0f * a);
+    uint8_t b = (uint8_t)(255.0f * (1.0f - a));
+    ring.fill(ring.Color(r, 0, b));
+    ring.show();
+    delay(20);
+  }
+  ring.clear();
+  ring.show();
+}
+
+void transitionPreviewAnimation() {
+  bool oldPreview = transitionPreviewActive;
+  uint8_t oldHours = transitionPreviewHours;
+  uint8_t oldMinutes = transitionPreviewMinutes;
+
+  transitionPreviewActive = true;
+  const uint8_t seq[][2] = {{12, 34}, {56, 78}, {12, 34}, {88, 88}};
+  for (uint8_t s = 0; s < 4; s++) {
+    transitionPreviewHours = seq[s][0];
+    transitionPreviewMinutes = seq[s][1];
+    for (uint8_t f = 0; f < 42; f++) {
+      displayClock();
+    }
+  }
+
+  transitionPreviewActive = oldPreview;
+  transitionPreviewHours = oldHours;
+  transitionPreviewMinutes = oldMinutes;
 }
 
 
