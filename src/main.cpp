@@ -12,6 +12,7 @@
 #include <sys/time.h>
 #include <EEPROM.h>
 #include <Wire.h>
+#include <SPI.h>
 #include <RTClib.h>
 
 #if defined(ARDUINO_ARCH_ESP8266)
@@ -42,7 +43,7 @@ public:
 
   void clear() {
     for (uint16_t i = 0; i < count; i++) {
-      strip.SetPixelColor(i, RgbColor(0, 0, 0));
+      strip.SetPixelColor(i, RgbwColor(0, 0, 0, 0));
     }
   }
 
@@ -73,7 +74,7 @@ public:
       b = (uint8_t)((uint16_t)b * brightness / 255);
     }
 
-    strip.SetPixelColor(index, RgbColor(r, g, b));
+    strip.SetPixelColor(index, RgbwColor(r, g, b, 0));
   }
 
   void fill(uint32_t packedColor) {
@@ -84,11 +85,11 @@ public:
 
 private:
   #if defined(ARDUINO_ARCH_ESP8266)
-  NeoPixelBus<NeoGrbFeature, NeoEsp8266BitBang800KbpsMethod> strip;
+  NeoPixelBus<NeoGrbwFeature, NeoEsp8266BitBang800KbpsMethod> strip;
   #elif defined(ARDUINO_ARCH_ESP32)
-  NeoPixelBus<NeoGrbFeature, NeoEsp32Rmt0800KbpsMethod> strip;
+  NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0800KbpsMethod> strip;
   #else
-  NeoPixelBus<NeoGrbFeature, NeoEsp8266BitBang800KbpsMethod> strip;
+  NeoPixelBus<NeoGrbwFeature, NeoEsp8266BitBang800KbpsMethod> strip;
   #endif
   uint16_t count;
   uint8_t brightness;
@@ -205,7 +206,7 @@ byte digits[12][7] = {
 };
 
 byte segmentState[NUM_SEG * 7] = {0};
-uint8_t transitionStep = 0;
+uint16_t transitionStep = 0;
 
 void setup() {
   Serial.begin(9600);
@@ -324,10 +325,13 @@ void displayClock() {
   uint8_t activeBrightness = getActiveBrightness(&now);
   ring.setBrightness(activeBrightness);
 
-  setDigit((uint8_t)now.tm_hour, 1);
-  setDigit((uint8_t)now.tm_min, 2);
+  uint8_t hours = (uint8_t)now.tm_hour;
+  uint8_t minutes = (uint8_t)now.tm_min;
 
-  transitionStep++;
+  setDigit(hours, 1);
+  setDigit(minutes, 2);
+
+  transitionStep += 8;
   if (transitionStep > 254) {
     for (uint16_t i = 0; i < NUM_SEG * 7; i++) {
       if (segmentState[i] == 2) {
@@ -1061,7 +1065,6 @@ void wifiFailedAnimation() {
     delay(200);
   }
 }
-
 
 
 
