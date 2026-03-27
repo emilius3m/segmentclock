@@ -74,20 +74,44 @@ On first upload, wait ~20-40 seconds after reboot for Wi-Fi + NTP sync.
 - Example: `http://192.168.1.123/`
 
 From this page you can:
-- change colors (quadrants/hour/minute/second)
+- change **segment color** and **second dots color**
 - set brightness
-- show/hide quadrants
+- select transition effect (multiple modes)
 - choose time source: NTP or DS3231
 - set date/time manually from browser
 - set custom NTP server
 - choose timezone preset (Rome/London/UTC and others)
-- choose hour-hand mode (step/continuous)
+- run animation tests (including wave/comet/rain/sparkle/scanner/breathing)
+
+Transition modes currently available:
+- Smooth
+- Instant
+- Soft (slow fade)
+- Wipe
+- Clockwise
+- Dual-phase
+- Bounce
+- Glitch Soft
+- Overshoot
+- Slide
+
+When you change transition mode in the dropdown, the firmware runs an immediate preview demo automatically.
 
 Settings are saved in EEPROM and restored after reboot.
 
 Note about buttons:
 - **Set Time** updates current clock time (system + DS3231 when available)
 - **Save Settings** stores configuration options (colors, brightness, timezone, time source, etc.)
+
+Startup sequence currently configured:
+1. Technical test `12:34` (1 second)
+2. Segment test `8888` (1 second)
+3. Wi-Fi connect animation
+4. `CIAO` rainbow message (~5 seconds)
+
+Network robustness:
+- NTP retry uses progressive backoff (starts at 30s, up to 300s)
+- Visual cue is shown on retry and on sync success/failure
 
 ### Web UI screenshot
 
