@@ -502,7 +502,11 @@ void displayClock() {
           int gate = (int)segRank * 28;
           fade = (transitionStep < gate) ? 255 : (255 - (transitionStep - gate) * 2);
         } else if (transitionMode == 5) {
-          fade = (transitionStep < 128) ? (255 - (int)transitionStep * 2) : 0;
+          if (transitionStep < 90) {
+            fade = 255 - (int)transitionStep * 3;
+          } else {
+            fade = 0;
+          }
         } else if (transitionMode == 6) {
           fade = (transitionStep < 90) ? 255 : (255 - ((int)transitionStep - 90) * 3);
         } else if (transitionMode == 7) {
@@ -512,8 +516,8 @@ void displayClock() {
         } else if (transitionMode == 8) {
           fade = 255 - (int)transitionStep * 2;
         } else if (transitionMode == 9) {
-          int gate = (int)digitSlot * 52;
-          fade = (transitionStep < gate) ? 255 : (255 - (transitionStep - gate) * 2);
+          int gate = (int)digitSlot * 70;
+          fade = (transitionStep < gate) ? 255 : (255 - (transitionStep - gate) * 4);
         }
         if (fade < 0) fade = 0;
         if (fade > 255) fade = 255;
@@ -527,7 +531,7 @@ void displayClock() {
           int gate = (int)segRank * 28;
           inb = (transitionStep < gate) ? 0 : (transitionStep - gate) * 2;
         } else if (transitionMode == 5) {
-          inb = (transitionStep < 128) ? 0 : ((int)transitionStep - 128) * 2;
+          inb = (transitionStep < 150) ? 0 : ((int)transitionStep - 150) * 3;
         } else if (transitionMode == 6) {
           if (transitionStep < 128) {
             inb = transitionStep * 2;
@@ -543,8 +547,8 @@ void displayClock() {
         } else if (transitionMode == 8) {
           inb = (transitionStep < 170) ? (transitionStep + 90) : 255;
         } else if (transitionMode == 9) {
-          int gate = (int)digitSlot * 52;
-          inb = (transitionStep < gate) ? 0 : (transitionStep - gate) * 2;
+          int gate = (int)digitSlot * 70 + 60;
+          inb = (transitionStep < gate) ? 0 : (transitionStep - gate) * 4;
         }
         if (inb < 0) inb = 0;
         if (inb > 255) inb = 255;
