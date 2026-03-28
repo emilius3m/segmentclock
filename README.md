@@ -104,8 +104,7 @@ Note about buttons:
 - **Save Settings** stores configuration options (colors, brightness, timezone, time source, etc.)
 
 Startup sequence currently configured:
-1. Technical test `12:34` (1 second)
-2. Segment test `8888` (1 second)
+1. Segment test `88:88` (3 seconds)
 3. Wi-Fi connect animation
 4. `CIAO` rainbow message (~5 seconds)
 

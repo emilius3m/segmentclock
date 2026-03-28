@@ -203,7 +203,7 @@ uint8_t nightStartHour = 22;
 uint8_t nightEndHour = 7;
 // Transition effects:
 // 0 smooth, 1 instant, 2 soft, 3 wipe, 4 clockwise,
-// 5 dual-phase, 6 bounce, 7 glitch, 8 overshoot, 9 slide
+// 5 dual-phase, 9 slide
 uint8_t transitionMode = 0;
 const uint8_t NORMAL_BRIGHTNESS = 255;
 
@@ -224,6 +224,8 @@ byte digits[12][7] = {
 
 byte segmentState[NUM_SEG * 7] = {0};
 uint16_t transitionStep = 0;
+unsigned long digitBlackoutUntil[NUM_SEG] = {0};
+const unsigned long DIGIT_BLACKOUT_MS = 300UL;
 
 const uint32_t COLOR_SEGMENT_DAY = 0xFFFFFF;
 const uint32_t COLOR_SEGMENT_NIGHT = 0xFFC080;
@@ -269,7 +271,23 @@ void setup() {
 
   // Initialize NeoPixel Ring
   ring.begin();
-  ring.setBrightness(NORMAL_BRIGHTNESS);
+  uint8_t startupBrightness = NORMAL_BRIGHTNESS;
+  if (brightnessMode != 0) {
+    time_t startupEpoch = time(nullptr);
+    if (startupEpoch < 100000 && rtcAvailable) {
+      startupEpoch = rtc.now().unixtime();
+    }
+
+    if (startupEpoch > 100000) {
+      struct tm startupLocal;
+      localtime_r(&startupEpoch, &startupLocal);
+      startupBrightness = getActiveBrightness(&startupLocal);
+    } else if (brightnessMode == 2) {
+      startupBrightness = dimBrightness;
+    }
+  }
+
+  ring.setBrightness(startupBrightness);
   ring.show();
 
   // Startup technical test first of all.
@@ -452,12 +470,16 @@ void displayClock() {
   uint8_t transitionStepSize;
   if (transitionMode == 2) {
     transitionStepSize = nightVisualMode ? 2 : 6;
-  } else if (transitionMode == 7) {
-    transitionStepSize = nightVisualMode ? 6 : 18;
-  } else if (transitionMode == 8) {
+  } else if (transitionMode == 6) {
     transitionStepSize = nightVisualMode ? 6 : 16;
+  } else if (transitionMode == 7) {
+    transitionStepSize = nightVisualMode ? 8 : 22;
+  } else if (transitionMode == 8) {
+    transitionStepSize = nightVisualMode ? 8 : 20;
+  } else if (transitionMode == 9) {
+    transitionStepSize = nightVisualMode ? 7 : 18;
   } else {
-    transitionStepSize = nightVisualMode ? 4 : 12;
+    transitionStepSize = nightVisualMode ? 5 : 14;
   }
   transitionStep += transitionStepSize;
   if (transitionStep > 254) {
@@ -472,10 +494,16 @@ void displayClock() {
     transitionStep = 0;
   }
 
+  unsigned long frameNowMs = millis();
+
   for (uint16_t i = 0; i < NUM_SEG; i++) {
     for (uint16_t j = 0; j < 7; j++) {
       uint16_t ledIndex = i * 7 + j;
       uint8_t digitSlot = (uint8_t)(ledIndex / 7);
+      if (digitSlot < NUM_SEG && frameNowMs < digitBlackoutUntil[digitSlot]) {
+        ring.setPixelColor(ledIndex, ring.Color(0, 0, 0));
+        continue;
+      }
       uint8_t segPos = (uint8_t)(ledIndex % 7);
       static const uint8_t clockwiseRank[7] = {0, 2, 3, 1, 5, 6, 4};
       uint8_t segRank = clockwiseRank[segPos];
@@ -510,14 +538,23 @@ void displayClock() {
         } else if (transitionMode == 6) {
           fade = (transitionStep < 90) ? 255 : (255 - ((int)transitionStep - 90) * 3);
         } else if (transitionMode == 7) {
-          if (transitionStep < 72 && random(0, 100) < 30) {
+          if (random(0, 100) < 45) {
             fade = random(20, 255);
+          } else if (random(0, 100) < 12) {
+            fade = 0;
           }
         } else if (transitionMode == 8) {
-          fade = 255 - (int)transitionStep * 2;
+          fade = 320 - (int)transitionStep * 3;
         } else if (transitionMode == 9) {
           int gate = (int)digitSlot * 70;
           fade = (transitionStep < gate) ? 255 : (255 - (transitionStep - gate) * 4);
+        }
+        if (transitionMode == 3 || transitionMode == 4) {
+          uint16_t wavePhase = (uint16_t)((millis() / 7UL + (uint32_t)ledIndex * 13UL + transitionStep) & 0xFFU);
+          int wave = (wavePhase < 128U) ? (int)wavePhase : (255 - (int)wavePhase);
+          fade += wave / 6;
+        } else if (transitionMode == 6 && transitionStep > 130 && transitionStep < 190) {
+          fade += (190 - (int)transitionStep) / 2;
         }
         if (fade < 0) fade = 0;
         if (fade > 255) fade = 255;
@@ -541,14 +578,27 @@ void displayClock() {
             inb = 220 + ((int)transitionStep - 200) * 35 / 55;
           }
         } else if (transitionMode == 7) {
-          if (transitionStep < 72 && random(0, 100) < 35) {
+          if (random(0, 100) < 55) {
             inb = random(0, 255);
+          } else if (random(0, 100) < 10) {
+            inb = 255;
           }
         } else if (transitionMode == 8) {
-          inb = (transitionStep < 170) ? (transitionStep + 90) : 255;
+          if (transitionStep < 110) {
+            inb = transitionStep * 3;
+          } else if (transitionStep < 190) {
+            inb = 255 + (190 - (int)transitionStep) * 2;
+          } else {
+            inb = 255;
+          }
         } else if (transitionMode == 9) {
           int gate = (int)digitSlot * 70 + 60;
           inb = (transitionStep < gate) ? 0 : (transitionStep - gate) * 4;
+        }
+        if (transitionMode == 3 || transitionMode == 4) {
+          uint16_t wavePhase = (uint16_t)((millis() / 7UL + (uint32_t)ledIndex * 19UL + transitionStep * 2UL) & 0xFFU);
+          int wave = (wavePhase < 128U) ? (int)wavePhase : (255 - (int)wavePhase);
+          inb += wave / 5;
         }
         if (inb < 0) inb = 0;
         if (inb > 255) inb = 255;
@@ -594,23 +644,34 @@ void setDigit(uint8_t number, uint8_t index) {
   for (uint8_t i = 1; i <= 2; i++) {
     uint8_t digit = number % 10;
     number /= 10;
+    uint8_t slot = (uint8_t)(index * 2 - i);
+    bool digitChanged = false;
     for (uint8_t j = 0; j < 7; j++) {
       uint16_t segmentIndex = (uint16_t)((index * 2 - i) * 7 + j);
       if (segmentIndex >= (NUM_SEG * 7)) {
         continue;
       }
       if (transitionMode == 1) {
-        segmentState[segmentIndex] = digits[digit][j] ? 1 : 0;
+        uint8_t targetState = digits[digit][j] ? 1 : 0;
+        if (segmentState[segmentIndex] != targetState) {
+          digitChanged = true;
+        }
+        segmentState[segmentIndex] = targetState;
       } else {
         if ((digits[digit][j] == 0) && (segmentState[segmentIndex] == 1)) {
           segmentState[segmentIndex] = 2;
           transitionStep = 0;
+          digitChanged = true;
         }
         if ((digits[digit][j] == 1) && (segmentState[segmentIndex] == 0)) {
           segmentState[segmentIndex] = 3;
           transitionStep = 0;
+          digitChanged = true;
         }
       }
+    }
+    if (digitChanged && slot < NUM_SEG) {
+      digitBlackoutUntil[slot] = millis() + DIGIT_BLACKOUT_MS;
     }
   }
 }
@@ -630,7 +691,7 @@ void handleRoot() {
     strftime(manualDateTimeValue, sizeof(manualDateTimeValue), "%Y-%m-%dT%H:%M:%S", &now);
   }
 
-  String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>";
+  String html = "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'><title>Segment Clock Control Panel</title>";
   html += "<style>body{font-family:Arial,sans-serif;background:#0f172a;color:#e2e8f0;margin:0;padding:16px;}";
   html += ".card{max-width:720px;margin:0 auto;background:#111827;border:1px solid #334155;border-radius:12px;padding:18px;}";
   html += "h1{margin:0 0 8px 0;font-size:22px;}h2{margin:20px 0 10px 0;font-size:16px;color:#93c5fd;}";
@@ -715,31 +776,11 @@ void handleRoot() {
     html += " selected";
   }
   html += ">Wipe</option>";
-  html += "<option value='4'";
-  if (transitionMode == 4) {
-    html += " selected";
-  }
-  html += ">Clockwise</option>";
   html += "<option value='5'";
   if (transitionMode == 5) {
     html += " selected";
   }
   html += ">Dual-phase</option>";
-  html += "<option value='6'";
-  if (transitionMode == 6) {
-    html += " selected";
-  }
-  html += ">Bounce</option>";
-  html += "<option value='7'";
-  if (transitionMode == 7) {
-    html += " selected";
-  }
-  html += ">Glitch Soft</option>";
-  html += "<option value='8'";
-  if (transitionMode == 8) {
-    html += " selected";
-  }
-  html += ">Overshoot</option>";
   html += "<option value='9'";
   if (transitionMode == 9) {
     html += " selected";
@@ -899,6 +940,10 @@ void handleUpdate() {
     }
     if (mode > 9) {
       mode = 9;
+    }
+    // Removed modes remapped to Wipe (3).
+    if (mode == 4 || mode == 6 || mode == 7 || mode == 8) {
+      mode = 3;
     }
     transitionMode = (uint8_t)mode;
   }
@@ -1302,6 +1347,9 @@ void loadSettings() {
     tzInfo[sizeof(tzInfo) - 1] = '\0';
   }
   transitionMode = (s.transitionMode <= 9) ? s.transitionMode : 0;
+  if (transitionMode == 4 || transitionMode == 6 || transitionMode == 7 || transitionMode == 8) {
+    transitionMode = 3;
+  }
 
   Serial.println(String("Loaded NTP from EEPROM: ") + ntpServer);
   Serial.println(String("Loaded TZ from EEPROM: ") + tzInfo);
@@ -1335,24 +1383,7 @@ void saveSettings() {
 }
 
 void showStartupTechnicalSequence() {
-  const uint8_t startup1234[4] = {1, 2, 3, 4};
   const uint8_t startup8888[4] = {8, 8, 8, 8};
-
-  ring.clear();
-  for (uint8_t digitIndex = 0; digitIndex < NUM_SEG; digitIndex++) {
-    for (uint8_t seg = 0; seg < 7; seg++) {
-      uint16_t ledIndex = (uint16_t)digitIndex * 7 + seg;
-      if (digits[startup1234[digitIndex]][seg]) {
-        ring.setPixelColor(ledIndex, colorQuadrants);
-      } else {
-        ring.setPixelColor(ledIndex, ring.Color(0, 0, 0));
-      }
-    }
-  }
-  ring.setPixelColor(NUM_SEG * 7, colorSecondHand);
-  ring.setPixelColor(NUM_SEG * 7 + 1, colorSecondHand);
-  ring.show();
-  delay(1000);
 
   ring.clear();
   for (uint8_t digitIndex = 0; digitIndex < NUM_SEG; digitIndex++) {
@@ -1365,10 +1396,10 @@ void showStartupTechnicalSequence() {
       }
     }
   }
-  ring.setPixelColor(NUM_SEG * 7, ring.Color(0, 0, 0));
-  ring.setPixelColor(NUM_SEG * 7 + 1, ring.Color(0, 0, 0));
+  ring.setPixelColor(NUM_SEG * 7, colorSecondHand);
+  ring.setPixelColor(NUM_SEG * 7 + 1, colorSecondHand);
   ring.show();
-  delay(1000);
+  delay(3000);
 }
 
 void showCiaoMessage() {
@@ -1612,13 +1643,24 @@ void transitionPreviewAnimation() {
   uint8_t oldMinutes = transitionPreviewMinutes;
 
   transitionPreviewActive = true;
-  const uint8_t seq[][2] = {{12, 34}, {56, 78}, {12, 34}, {88, 88}};
-  for (uint8_t s = 0; s < 4; s++) {
-    transitionPreviewHours = seq[s][0];
-    transitionPreviewMinutes = seq[s][1];
-    for (uint8_t f = 0; f < 42; f++) {
-      displayClock();
-    }
+  // Preview flow: hold 12:39, then apply selected transition to 12:40.
+  transitionPreviewHours = 12;
+  transitionPreviewMinutes = 39;
+  unsigned long previewHoldStartMs = millis();
+  while (millis() - previewHoldStartMs < 3000UL) {
+    displayClock();
+  }
+
+  transitionPreviewHours = 12;
+  transitionPreviewMinutes = 40;
+  unsigned long previewTransitionStartMs = millis();
+  while (millis() - previewTransitionStartMs < 1200UL) {
+    displayClock();
+  }
+
+  unsigned long previewEndHoldStartMs = millis();
+  while (millis() - previewEndHoldStartMs < 3000UL) {
+    displayClock();
   }
 
   transitionPreviewActive = oldPreview;

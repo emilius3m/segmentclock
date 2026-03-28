@@ -1,0 +1,35 @@
+#include <Arduino.h>
+#include <NeoPixelBus.h>
+
+#if defined(ARDUINO_ARCH_ESP8266)
+#define DATA_PIN D5
+using StripType = NeoPixelBus<NeoGrbwFeature, NeoEsp8266BitBang800KbpsMethod>;
+#elif defined(ARDUINO_ARCH_ESP32)
+#define DATA_PIN 5
+using StripType = NeoPixelBus<NeoGrbwFeature, NeoEsp32Rmt0800KbpsMethod>;
+#else
+#define DATA_PIN 5
+using StripType = NeoPixelBus<NeoGrbwFeature, NeoEsp8266BitBang800KbpsMethod>;
+#endif
+
+static const uint8_t LED_COUNT = 7;
+StripType strip(LED_COUNT, DATA_PIN);
+
+void setup() {
+  strip.Begin();
+  strip.Show();
+
+  strip.SetPixelColor(0, RgbwColor(255, 0, 0, 0));
+  strip.SetPixelColor(1, RgbwColor(255, 0, 0, 0));
+  strip.SetPixelColor(2, RgbwColor(255, 0, 0, 0));
+  strip.SetPixelColor(3, RgbwColor(255, 0, 0, 0));
+  strip.SetPixelColor(4, RgbwColor(255, 0, 0, 0));
+  strip.SetPixelColor(5, RgbwColor(255, 0, 0, 0));
+  strip.SetPixelColor(6, RgbwColor(255, 0, 0, 0));
+
+  strip.Show();
+}
+
+void loop() {
+  delay(1000);
+}
