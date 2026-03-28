@@ -86,16 +86,19 @@ From this page you can:
 Transition modes currently available:
 - Smooth
 - Instant
-- Soft (slow fade)
+- Soft
 - Wipe
-- Clockwise
+- Blackout 0.3s
 - Dual-phase
+- Brightness Pulse
 - Bounce
-- Glitch Soft
-- Overshoot
+- Glitter
 - Slide
 
-When you change transition mode in the dropdown, the firmware runs an immediate preview demo automatically.
+When you change transition mode in the dropdown, the firmware runs an immediate preview demo automatically:
+- shows `12:39` for 3 seconds
+- applies selected effect to transition `12:39` -> `12:40`
+- keeps `12:40` visible for 3 seconds
 
 Settings are saved in EEPROM and restored after reboot.
 
@@ -105,6 +108,7 @@ Note about buttons:
 
 Startup sequence currently configured:
 1. Segment test `88:88` (3 seconds)
+2. Rotating ring animation + startup effects
 3. Wi-Fi connect animation
 4. `CIAO` rainbow message (~5 seconds)
 
