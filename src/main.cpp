@@ -741,7 +741,7 @@ void handleRoot() {
   html += F("button{background:#2563eb;color:white;border:none;border-radius:8px;padding:10px 14px;font-weight:600;cursor:pointer;}");
   html += F("small{color:#94a3b8;} .status{margin:8px 0 14px 0;padding:10px;border-radius:8px;background:#0b1220;border:1px solid #334155;}");
   html += F("</style></head><body><div class='card'>");
-  html += F("<h1>WS2812 LED Ring Clock</h1>");
+  html += F("<h1>Segment Clock</h1>");
   html += F("<div class='status'>");
   if (nowEpoch < VALID_EPOCH_THRESHOLD) {
     html += F("Current Time: not synced (NTP)<br>");
